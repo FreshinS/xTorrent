@@ -1,4 +1,4 @@
-# XTorrent
+# XTorrent [![CI](https://github.com/FreshinS/xTorrent/actions/workflows/ci.yml/badge.svg)](https://github.com/FreshinS/xTorrent/actions/workflows/ci.yml)
 
 XTorrent (temporary name) is an open-source BitTorrent client built in Rust without using BitTorrent libs.
 
