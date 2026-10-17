@@ -1,6 +1,6 @@
 use std::{env, error::Error, fs, path::PathBuf, process};
 
-use xtorrent::metainfo::{self, TorrentMeta};
+use xtorrent::torrent::{self, metainfo::TorrentMeta};
 
 fn main() {
     let file_arg = match env::args().nth(1) {
@@ -21,7 +21,7 @@ fn run(file_arg: String) -> Result<(), Box<dyn Error>> {
     let file_path = PathBuf::from(file_arg);
     let bytes = fs::read(file_path)?;
 
-    let torrent = metainfo::parse(&bytes)?;
+    let torrent = torrent::metainfo::parse(&bytes)?;
     print_summary(&torrent);
 
     Ok(())
