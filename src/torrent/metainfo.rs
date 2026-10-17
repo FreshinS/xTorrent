@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::torrent::bencode::{BencodeValue, DecodeError, bdecode};
+use crate::torrent::bencode::{BencodeValue, DecodeError, bdecode, value_type};
 use crate::torrent::parsers::{
     parse_announce_list, parse_http_seeds, parse_info, parse_integer, parse_nodes, parse_string,
     parse_url_list,
@@ -184,15 +184,6 @@ pub fn parse(data: &[u8]) -> Result<TorrentMeta, MetainfoError> {
 pub fn missing_field(field: &str) -> MetainfoError {
     MetainfoError::MissingField {
         field: field.to_owned(),
-    }
-}
-
-pub fn value_type(value: &BencodeValue) -> &'static str {
-    match value {
-        BencodeValue::Integer(_) => "integer",
-        BencodeValue::Bytes(_) => "byte string",
-        BencodeValue::List(_) => "list",
-        BencodeValue::Dictionary(_) => "dictionary",
     }
 }
 

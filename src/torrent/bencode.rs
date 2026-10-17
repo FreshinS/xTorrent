@@ -185,6 +185,15 @@ pub fn bdecode(data: &[u8], index: usize) -> Result<(BencodeValue, usize), Decod
     }
 }
 
+pub fn value_type(value: &BencodeValue) -> &'static str {
+    match value {
+        BencodeValue::Integer(_) => "integer",
+        BencodeValue::Bytes(_) => "byte string",
+        BencodeValue::List(_) => "list",
+        BencodeValue::Dictionary(_) => "dictionary",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
