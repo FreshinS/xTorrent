@@ -8,5 +8,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
+rand = "0.10.3"
+reqwest = { version = "0.13.5", features = ["json"] }
 sha1 = "0.11.0"
 thiserror = "2.0.21"
+tokio = "1.53.3"

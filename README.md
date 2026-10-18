@@ -6,7 +6,7 @@ XTorrent (temporary name) is an open-source BitTorrent client built in Rust with
 
 # Usage
 
-At current state of project you can only parse meta-data from .torrent file.
+At current state of project you can only parse meta-data from .torrent file and make HTTP announce request.
 
 ```bash
 cargo run -- ./path-to-torrent-file
@@ -16,7 +16,8 @@ cargo run -- ./path-to-torrent-file
 
 - [X] Bencode Decoder (Done 10.10.2026)
 - [X] Parse Torrent File (Done 13.10.2026)
-- [ ] Tracker Client
+- [X] HTTP Tracker Client (Done 18.10.2026)
+- [ ] UDP Tracker Client
 - [ ] Peer Wire Protocol
 - [ ] Piece Downloader
 - [ ] File & Downloads Manager
