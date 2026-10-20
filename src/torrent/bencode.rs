@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+pub mod parse;
+
 #[derive(Debug, Error)]
 pub enum DecodeError {
     #[error("Unexpected end of bencode data at byte offset {offset}")]

@@ -1,12 +1,16 @@
 use crate::torrent::{
-    bencode::BencodeValue,
-    metainfo::{MetainfoError, TorrentFile, TorrentInfoV1, missing_field, unexpected_type},
+    bencode::{
+        BencodeValue,
+        parse::{
+            ParseError, missing_field, parse_bytes, parse_dictionary, parse_integer, parse_list,
+            parse_string, unexpected_type,
+        },
+    },
+    metainfo::{MetainfoError, TorrentFile, TorrentInfoV1},
 };
 
 pub fn parse_info(info: &BencodeValue) -> Result<TorrentInfoV1, MetainfoError> {
-    let BencodeValue::Dictionary(info_dict) = info else {
-        return Err(unexpected_type(info, "info", "dictionary"));
-    };
+    let info_dict = parse_dictionary(info, "info")?;
 
     let mut name = None;
     let mut piece_length = None;
@@ -68,17 +72,13 @@ pub fn parse_info(info: &BencodeValue) -> Result<TorrentInfoV1, MetainfoError> {
         });
     } else {
         let files_value = files.ok_or_else(|| missing_field("info.files"))?;
-        let BencodeValue::List(file_list) = files_value else {
-            return Err(unexpected_type(files_value, "info.files", "list"));
-        };
+        let file_list = parse_list(files_value, "info.files")?;
 
         let mut offset = 0;
 
         for (file_index, file) in file_list.iter().enumerate() {
             let file_field = format!("info.files[{file_index}]");
-            let BencodeValue::Dictionary(file_value) = file else {
-                return Err(unexpected_type(file, &file_field, "dictionary"));
-            };
+            let file_value = parse_dictionary(file, &file_field)?;
 
             let length_field = format!("{file_field}.length");
             let path_field = format!("{file_field}.path");
@@ -97,11 +97,9 @@ pub fn parse_info(info: &BencodeValue) -> Result<TorrentInfoV1, MetainfoError> {
                         })?);
                     }
                     b"path" => {
-                        let BencodeValue::List(path_values) = value else {
-                            return Err(unexpected_type(value, &path_field, "list"));
-                        };
+                        let path_values = parse_list(value, &path_field)?;
 
-                        let path: Result<Vec<String>, MetainfoError> = path_values
+                        let path: Result<Vec<String>, ParseError> = path_values
                             .iter()
                             .enumerate()
                             .map(|(index, part)| {
@@ -143,9 +141,7 @@ pub fn parse_info(info: &BencodeValue) -> Result<TorrentInfoV1, MetainfoError> {
 }
 
 pub fn parse_hashes(value: &BencodeValue) -> Result<Vec<[u8; 20]>, MetainfoError> {
-    let BencodeValue::Bytes(value_bytes) = value else {
-        return Err(unexpected_type(value, "info.pieces", "byte string"));
-    };
+    let value_bytes = parse_bytes(value, "info.pieces")?;
 
     let (chunks, remainder) = value_bytes.as_chunks::<20>();
     if !remainder.is_empty() {
@@ -158,44 +154,34 @@ pub fn parse_hashes(value: &BencodeValue) -> Result<Vec<[u8; 20]>, MetainfoError
 }
 
 pub fn parse_http_seeds(value: &BencodeValue) -> Result<Vec<String>, MetainfoError> {
-    let BencodeValue::List(seed_values) = value else {
-        return Err(unexpected_type(value, "httpseeds", "list"));
-    };
+    let seed_values = parse_list(value, "httpseeds")?;
 
-    seed_values
+    Ok(seed_values
         .iter()
         .enumerate()
         .map(|(index, item)| parse_string(item, &format!("httpseeds[{index}]")))
-        .collect()
+        .collect::<Result<_, _>>()?)
 }
 
 pub fn parse_url_list(value: &BencodeValue) -> Result<Vec<String>, MetainfoError> {
     match value {
         BencodeValue::Bytes(_) => Ok(vec![parse_string(value, "url-list")?]),
-        BencodeValue::List(items) => items
+        BencodeValue::List(items) => Ok(items
             .iter()
             .enumerate()
             .map(|(index, item)| parse_string(item, &format!("url-list[{index}]")))
-            .collect(),
-        _ => Err(unexpected_type(value, "url-list", "byte string or list")),
+            .collect::<Result<_, _>>()?),
+        _ => Err(unexpected_type(value, "url-list", "byte string or list").into()),
     }
 }
 
 pub fn parse_nodes(value: &BencodeValue) -> Result<Vec<(String, u16)>, MetainfoError> {
-    let BencodeValue::List(node_values) = value else {
-        return Err(unexpected_type(value, "nodes", "list"));
-    };
+    let node_values = parse_list(value, "nodes")?;
 
     let mut nodes = Vec::new();
 
     for (index, node_value) in node_values.iter().enumerate() {
-        let BencodeValue::List(node) = node_value else {
-            return Err(unexpected_type(
-                node_value,
-                &format!("nodes[{index}]"),
-                "list",
-            ));
-        };
+        let node = parse_list(node_value, &format!("nodes[{index}]"))?;
 
         if node.len() != 2 {
             return Err(MetainfoError::InvalidNodeLength {
@@ -228,19 +214,15 @@ pub fn parse_nodes(value: &BencodeValue) -> Result<Vec<(String, u16)>, MetainfoE
 }
 
 pub fn parse_announce_list(value: &BencodeValue) -> Result<Vec<Vec<String>>, MetainfoError> {
-    let BencodeValue::List(tier_values) = value else {
-        return Err(unexpected_type(value, "announce-list", "list"));
-    };
+    let tier_values = parse_list(value, "announce-list")?;
 
     let mut tiers = Vec::new();
 
     for (tier_index, tier_value) in tier_values.iter().enumerate() {
         let tier_field = format!("announce-list[{tier_index}]");
-        let BencodeValue::List(tracker_values) = tier_value else {
-            return Err(unexpected_type(tier_value, &tier_field, "list"));
-        };
+        let tracker_values = parse_list(tier_value, &tier_field)?;
 
-        let tier: Result<Vec<String>, MetainfoError> = tracker_values
+        let tier: Result<Vec<String>, ParseError> = tracker_values
             .iter()
             .enumerate()
             .map(|(index, tracker)| parse_string(tracker, &format!("{tier_field}[{index}]")))
@@ -249,27 +231,6 @@ pub fn parse_announce_list(value: &BencodeValue) -> Result<Vec<Vec<String>>, Met
     }
 
     Ok(tiers)
-}
-
-pub fn parse_string(value: &BencodeValue, field: &str) -> Result<String, MetainfoError> {
-    let BencodeValue::Bytes(value_bytes) = value else {
-        return Err(unexpected_type(value, field, "byte string"));
-    };
-
-    let text = str::from_utf8(value_bytes).map_err(|source| MetainfoError::InvalidFieldUtf8 {
-        field: field.to_owned(),
-        source,
-    })?;
-
-    Ok(text.to_owned())
-}
-
-pub fn parse_integer(value: &BencodeValue, field: &str) -> Result<i64, MetainfoError> {
-    let BencodeValue::Integer(number) = value else {
-        return Err(unexpected_type(value, field, "integer"));
-    };
-
-    Ok(*number)
 }
 
 #[cfg(test)]
@@ -325,7 +286,10 @@ mod tests {
     fn parse_hashes_rejects_non_bytes() {
         let error = expect_error(parse_hashes(&List(Vec::new())));
         assert!(
-            matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+            ),
             "{error:?}"
         );
     }
@@ -339,7 +303,10 @@ mod tests {
         ] {
             let error = expect_error(parse_announce_list(&value));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -350,7 +317,10 @@ mod tests {
         let value = List(vec![List(vec![bytes(b"\xff")])]);
         let error = expect_error(parse_announce_list(&value));
         assert!(
-            matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+            ),
             "{error:?}"
         );
     }
@@ -360,7 +330,10 @@ mod tests {
         for value in [Integer(1), List(vec![Integer(1)])] {
             let error = expect_error(parse_nodes(&value));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -405,21 +378,30 @@ mod tests {
         let wrong_port = List(vec![List(vec![bytes(b"host"), bytes(b"6881")])]);
         let error = expect_error(parse_nodes(&wrong_port));
         assert!(
-            matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+            ),
             "{error:?}"
         );
 
         let wrong_host = List(vec![List(vec![Integer(1), Integer(6881)])]);
         let error = expect_error(parse_nodes(&wrong_host));
         assert!(
-            matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+            ),
             "{error:?}"
         );
 
         let invalid_utf8 = List(vec![List(vec![bytes(b"\xff"), Integer(6881)])]);
         let error = expect_error(parse_nodes(&invalid_utf8));
         assert!(
-            matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+            ),
             "{error:?}"
         );
     }
@@ -446,7 +428,10 @@ mod tests {
         ] {
             let error = expect_error(parse_url_list(&value));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -462,7 +447,10 @@ mod tests {
         for value in [bytes(b"https://seed/seed.php"), List(vec![Integer(1)])] {
             let error = expect_error(parse_http_seeds(&value));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -473,14 +461,20 @@ mod tests {
         for value in [bytes(b"\xff"), List(vec![bytes(b"\xff")])] {
             let error = expect_error(parse_url_list(&value));
             assert!(
-                matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+                ),
                 "{error:?}"
             );
         }
 
         let error = expect_error(parse_http_seeds(&List(vec![bytes(b"\xff")])));
         assert!(
-            matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+            ),
             "{error:?}"
         );
     }
@@ -534,7 +528,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                MetainfoError::InvalidFieldUtf8 { ref field, .. }
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { ref field, .. })
                     if field == "announce-list[1][0]"
             ),
             "{error:?}"

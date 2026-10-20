@@ -1,12 +1,18 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::str;
 
 use reqwest::Client;
 use thiserror::Error;
 
 use crate::{
     torrent::{
-        bencode::{BencodeValue, DecodeError, bdecode, value_type},
+        bencode::{
+            BencodeValue, DecodeError, bdecode,
+            parse::{
+                ParseError, missing_field, parse_bytes, parse_dictionary, parse_integer,
+                parse_string, unexpected_type,
+            },
+            value_type,
+        },
         metainfo::TorrentMeta,
     },
     utils::percent_encode_bytes,
@@ -66,22 +72,8 @@ pub enum TrackerError {
     #[error("Bencode decoding failed: {0}")]
     Decode(#[from] DecodeError),
 
-    #[error("Required tracker response field '{field}' is missing")]
-    MissingField { field: String },
-
-    #[error("Tracker response field '{field}': expected {expected}, found {actual}")]
-    UnexpectedFieldType {
-        field: String,
-        expected: &'static str,
-        actual: &'static str,
-    },
-
-    #[error("Tracker response field '{field}' is not valid UTF-8: {source}")]
-    InvalidFieldUtf8 {
-        field: String,
-        #[source]
-        source: std::str::Utf8Error,
-    },
+    #[error(transparent)]
+    Parse(#[from] ParseError),
 
     #[error("Tracker reported failure: {reason}")]
     FailureReason { reason: String },
@@ -176,43 +168,8 @@ pub async fn announce(
     Ok((parse_announce(&decoded_res)?, client, peer_id, port))
 }
 
-fn missing_field(field: &str) -> TrackerError {
-    TrackerError::MissingField {
-        field: field.to_owned(),
-    }
-}
-
-fn unexpected_type(value: &BencodeValue, field: &str, expected: &'static str) -> TrackerError {
-    TrackerError::UnexpectedFieldType {
-        field: field.to_owned(),
-        expected,
-        actual: value_type(value),
-    }
-}
-
-fn parse_tracker_string(value: &BencodeValue, field: &str) -> Result<String, TrackerError> {
-    let BencodeValue::Bytes(bytes) = value else {
-        return Err(unexpected_type(value, field, "byte string"));
-    };
-
-    let text = str::from_utf8(bytes).map_err(|source| TrackerError::InvalidFieldUtf8 {
-        field: field.to_owned(),
-        source,
-    })?;
-
-    Ok(text.to_owned())
-}
-
-fn parse_tracker_integer(value: &BencodeValue, field: &str) -> Result<i64, TrackerError> {
-    let BencodeValue::Integer(number) = value else {
-        return Err(unexpected_type(value, field, "integer"));
-    };
-
-    Ok(*number)
-}
-
 fn parse_counter(value: &BencodeValue, field: &str) -> Result<u64, TrackerError> {
-    let raw_value = parse_tracker_integer(value, field)?;
+    let raw_value = parse_integer(value, field)?;
     u64::try_from(raw_value).map_err(|_| TrackerError::InvalidCounter {
         field: field.to_owned(),
         value: raw_value,
@@ -250,11 +207,11 @@ fn parse_announce(announce: &BencodeValue) -> Result<AnnounceResponse, TrackerEr
         match key.as_slice() {
             b"failure reason" => {
                 return Err(TrackerError::FailureReason {
-                    reason: parse_tracker_string(value, "failure reason")?,
+                    reason: parse_string(value, "failure reason")?,
                 });
             }
             b"interval" => {
-                let raw_interval = parse_tracker_integer(value, "interval")?;
+                let raw_interval = parse_integer(value, "interval")?;
                 interval_field = Some(u64::try_from(raw_interval).map_err(|_| {
                     TrackerError::InvalidInterval {
                         value: raw_interval,
@@ -281,7 +238,7 @@ fn parse_announce(announce: &BencodeValue) -> Result<AnnounceResponse, TrackerEr
     let interval = interval_field.ok_or_else(|| missing_field("interval"))?;
 
     if !peers_field_seen {
-        return Err(missing_field("peers"));
+        return Err(missing_field("peers").into());
     }
 
     Ok(AnnounceResponse {
@@ -326,9 +283,7 @@ fn parse_peers_list(raw_peers: &[BencodeValue]) -> Result<Vec<Peer>, TrackerErro
 
     for (index, peer) in raw_peers.iter().enumerate() {
         let peer_field = format!("peers[{index}]");
-        let BencodeValue::Dictionary(peer_dict) = peer else {
-            return Err(unexpected_type(peer, &peer_field, "dictionary"));
-        };
+        let peer_dict = parse_dictionary(peer, &peer_field)?;
 
         let mut peer_id_field = None;
         let mut ip_field = None;
@@ -337,22 +292,16 @@ fn parse_peers_list(raw_peers: &[BencodeValue]) -> Result<Vec<Peer>, TrackerErro
         for (key, value) in peer_dict {
             match key.as_slice() {
                 b"ip" => {
-                    ip_field = Some(parse_tracker_string(value, &format!("{peer_field}.ip"))?);
+                    ip_field = Some(parse_string(value, &format!("{peer_field}.ip"))?);
                 }
                 b"port" => {
                     let field = format!("{peer_field}.port");
-                    let raw_port = parse_tracker_integer(value, &field)?;
+                    let raw_port = parse_integer(value, &field)?;
                     port_field = Some(valid_peer_port(raw_port, &field)?);
                 }
                 b"peer id" => {
-                    let BencodeValue::Bytes(peer_id_value) = value else {
-                        return Err(unexpected_type(
-                            value,
-                            &format!("{peer_field}.peer id"),
-                            "byte string",
-                        ));
-                    };
-                    peer_id_field = Some(peer_id_value.as_slice().try_into().map_err(|_| {
+                    let peer_id_value = parse_bytes(value, &format!("{peer_field}.peer id"))?;
+                    peer_id_field = Some(peer_id_value.try_into().map_err(|_| {
                         TrackerError::InvalidPeerIdLength {
                             field: format!("{peer_field}.peer id"),
                             actual: peer_id_value.len(),
@@ -387,14 +336,12 @@ fn parse_peers(value: &BencodeValue) -> Result<Vec<Peer>, TrackerError> {
     match value {
         BencodeValue::Bytes(peers) => parse_peers_string(peers),
         BencodeValue::List(peers) => parse_peers_list(peers),
-        _ => Err(unexpected_type(value, "peers", "byte string or list")),
+        _ => Err(unexpected_type(value, "peers", "byte string or list").into()),
     }
 }
 
 fn parse_peers6(value: &BencodeValue) -> Result<Vec<Peer>, TrackerError> {
-    let BencodeValue::Bytes(raw_peers) = value else {
-        return Err(unexpected_type(value, "peers6", "byte string"));
-    };
+    let raw_peers = parse_bytes(value, "peers6")?;
 
     let (raw_peer_chunks, remainder) = raw_peers.as_chunks::<18>();
     if !remainder.is_empty() {
@@ -540,13 +487,13 @@ mod tests {
         let missing_interval = dictionary(vec![(b"peers", BencodeValue::Bytes(Vec::new()))]);
         assert!(matches!(
             expect_error(parse_announce(&missing_interval)),
-            TrackerError::MissingField { ref field } if field == "interval"
+            TrackerError::Parse(ParseError::MissingField { ref field }) if field == "interval"
         ));
 
         let missing_peers = dictionary(vec![(b"interval", BencodeValue::Integer(30))]);
         assert!(matches!(
             expect_error(parse_announce(&missing_peers)),
-            TrackerError::MissingField { ref field } if field == "peers"
+            TrackerError::Parse(ParseError::MissingField { ref field }) if field == "peers"
         ));
     }
 
@@ -567,11 +514,11 @@ mod tests {
         ]);
         assert!(matches!(
             expect_error(parse_announce(&wrong_type)),
-            TrackerError::UnexpectedFieldType {
+            TrackerError::Parse(ParseError::UnexpectedFieldType {
                 ref field,
                 expected: "integer",
                 actual: "byte string",
-            } if field == "interval"
+            }) if field == "interval"
         ));
     }
 
@@ -615,11 +562,11 @@ mod tests {
         let wrong_type = expect_error(parse_peers6(&BencodeValue::List(Vec::new())));
         assert!(matches!(
             wrong_type,
-            TrackerError::UnexpectedFieldType {
+            TrackerError::Parse(ParseError::UnexpectedFieldType {
                 ref field,
                 expected: "byte string",
                 actual: "list",
-            } if field == "peers6"
+            }) if field == "peers6"
         ));
 
         for length in [1, 17, 19, 35] {
@@ -644,11 +591,11 @@ mod tests {
 
         assert!(matches!(
             error,
-            TrackerError::UnexpectedFieldType {
+            TrackerError::Parse(ParseError::UnexpectedFieldType {
                 ref field,
                 expected: "dictionary",
                 actual: "integer",
-            } if field == "peers[0]"
+            }) if field == "peers[0]"
         ));
     }
 
@@ -690,9 +637,9 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    TrackerError::MissingField { .. }
+                    TrackerError::Parse(ParseError::MissingField { .. })
                         | TrackerError::InvalidPeerIdLength { .. }
-                        | TrackerError::UnexpectedFieldType { .. }
+                        | TrackerError::Parse(ParseError::UnexpectedFieldType { .. })
                         | TrackerError::InvalidPeerPort { .. }
                         | TrackerError::EmptyPeerHost { .. }
                 ),
@@ -713,7 +660,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                TrackerError::InvalidFieldUtf8 { ref field, .. } if field == "peers[0].ip"
+                TrackerError::Parse(ParseError::InvalidFieldUtf8 { ref field, .. }) if field == "peers[0].ip"
             ),
             "{error:?}"
         );

@@ -1,9 +1,12 @@
 use std::ops::Range;
 
-use crate::torrent::bencode::{BencodeValue, DecodeError, bdecode, value_type};
+use crate::torrent::bencode::{
+    BencodeValue, DecodeError, bdecode,
+    parse::{ParseError, missing_field, parse_integer, parse_string},
+    value_type,
+};
 use crate::torrent::parsers::{
-    parse_announce_list, parse_http_seeds, parse_info, parse_integer, parse_nodes, parse_string,
-    parse_url_list,
+    parse_announce_list, parse_http_seeds, parse_info, parse_nodes, parse_url_list,
 };
 use sha1::{Digest, Sha1};
 use thiserror::Error;
@@ -49,22 +52,8 @@ pub enum MetainfoError {
     #[error("Torrent root must be a dictionary, found {actual}")]
     RootNotDictionary { actual: &'static str },
 
-    #[error("Required field '{field}' is missing")]
-    MissingField { field: String },
-
-    #[error("Field '{field}': expected {expected}, found {actual}")]
-    UnexpectedFieldType {
-        field: String,
-        expected: &'static str,
-        actual: &'static str,
-    },
-
-    #[error("Field '{field}' is not valid UTF-8: {source}")]
-    InvalidFieldUtf8 {
-        field: String,
-        #[source]
-        source: std::str::Utf8Error,
-    },
+    #[error(transparent)]
+    Parse(#[from] ParseError),
 
     #[error("Field 'nodes[{index}]' must contain exactly 2 elements [host, port], found {actual}")]
     InvalidNodeLength { index: usize, actual: usize },
@@ -181,20 +170,6 @@ pub fn parse(data: &[u8]) -> Result<TorrentMeta, MetainfoError> {
     })
 }
 
-pub fn missing_field(field: &str) -> MetainfoError {
-    MetainfoError::MissingField {
-        field: field.to_owned(),
-    }
-}
-
-pub fn unexpected_type(value: &BencodeValue, field: &str, expected: &'static str) -> MetainfoError {
-    MetainfoError::UnexpectedFieldType {
-        field: field.to_owned(),
-        expected,
-        actual: value_type(value),
-    }
-}
-
 /// Finds the original encoded info value after the root dictionary has been validated.
 pub fn find_info_range(data: &[u8]) -> Result<Range<usize>, MetainfoError> {
     let mut index = 1;
@@ -217,7 +192,7 @@ pub fn find_info_range(data: &[u8]) -> Result<Range<usize>, MetainfoError> {
         }
     }
 
-    Err(missing_field("info"))
+    Err(missing_field("info").into())
 }
 
 #[cfg(test)]
@@ -572,7 +547,7 @@ mod tests {
     fn find_info_range_reports_missing_info() {
         let error = expect_error(find_info_range(b"d7:comment4:infoe"));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info"),
             "{error:?}"
         );
     }
@@ -625,7 +600,7 @@ mod tests {
     fn parse_rejects_missing_info() {
         let error = expect_error(parse(b"de"));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info"),
             "{error:?}"
         );
     }
@@ -635,7 +610,10 @@ mod tests {
         let data = encode(&dictionary(vec![("info", Integer(1))]));
         let error = expect_error(parse(&data));
         assert!(
-            matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+            ),
             "{error:?}"
         );
     }
@@ -646,7 +624,7 @@ mod tests {
         info.remove(b"name".as_slice());
         let error = expect_error(parse(&torrent(info)));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info.name"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info.name"),
             "{error:?}"
         );
     }
@@ -657,7 +635,7 @@ mod tests {
         info.remove(b"piece length".as_slice());
         let error = expect_error(parse(&torrent(info)));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info.piece length"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info.piece length"),
             "{error:?}"
         );
     }
@@ -668,7 +646,7 @@ mod tests {
         info.remove(b"pieces".as_slice());
         let error = expect_error(parse(&torrent(info)));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info.pieces"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info.pieces"),
             "{error:?}"
         );
     }
@@ -680,7 +658,10 @@ mod tests {
             info.insert(key.as_bytes().to_vec(), List(Vec::new()));
             let error = expect_error(parse(&torrent(info)));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "field {key}: {error:?}"
             );
         }
@@ -692,7 +673,10 @@ mod tests {
         info.insert(b"name".to_vec(), bytes(b"\xff"));
         let error = expect_error(parse(&torrent(info)));
         assert!(
-            matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+            ),
             "{error:?}"
         );
     }
@@ -706,7 +690,10 @@ mod tests {
             ]));
             let error = expect_error(parse(&data));
             assert!(
-                matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+                ),
                 "field {key}: {error:?}"
             );
         }
@@ -788,7 +775,10 @@ mod tests {
             info.insert(b"files".to_vec(), files);
             let error = expect_error(parse(&torrent(info)));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -802,7 +792,7 @@ mod tests {
         ] {
             let error = expect_error(parse(&torrent(multi_info(vec![file]))));
             assert!(
-                matches!(error, MetainfoError::MissingField { ref field } if field == "info.files[0].length"),
+                matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info.files[0].length"),
                 "{error:?}"
             );
         }
@@ -813,7 +803,7 @@ mod tests {
         let file = dictionary(vec![("length", Integer(5))]);
         let error = expect_error(parse(&torrent(multi_info(vec![file]))));
         assert!(
-            matches!(error, MetainfoError::MissingField { ref field } if field == "info.files[0].path"),
+            matches!(error, MetainfoError::Parse(ParseError::MissingField { ref field }) if field == "info.files[0].path"),
             "{error:?}"
         );
     }
@@ -833,7 +823,10 @@ mod tests {
             let file = dictionary(vec![("length", Integer(5)), ("path", path)]);
             let error = expect_error(parse(&torrent(multi_info(vec![file]))));
             assert!(
-                matches!(error, MetainfoError::UnexpectedFieldType { .. }),
+                matches!(
+                    error,
+                    MetainfoError::Parse(ParseError::UnexpectedFieldType { .. })
+                ),
                 "{error:?}"
             );
         }
@@ -847,7 +840,10 @@ mod tests {
         ]);
         let error = expect_error(parse(&torrent(multi_info(vec![file]))));
         assert!(
-            matches!(error, MetainfoError::InvalidFieldUtf8 { .. }),
+            matches!(
+                error,
+                MetainfoError::Parse(ParseError::InvalidFieldUtf8 { .. })
+            ),
             "{error:?}"
         );
     }
@@ -887,11 +883,11 @@ mod tests {
         assert!(
             matches!(
                 error,
-                MetainfoError::UnexpectedFieldType {
+                MetainfoError::Parse(ParseError::UnexpectedFieldType {
                     ref field,
                     expected: "integer",
                     actual: "byte string",
-                } if field == "info.piece length"
+                }) if field == "info.piece length"
             ),
             "{error:?}"
         );
@@ -913,11 +909,11 @@ mod tests {
         assert!(
             matches!(
                 error,
-                MetainfoError::UnexpectedFieldType {
+                MetainfoError::Parse(ParseError::UnexpectedFieldType {
                     ref field,
                     expected: "byte string",
                     actual: "integer",
-                } if field == "info.files[1].path[1]"
+                }) if field == "info.files[1].path[1]"
             ),
             "{error:?}"
         );
